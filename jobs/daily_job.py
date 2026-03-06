@@ -118,10 +118,14 @@ def run():
                 _save_prediction(conn, game_id, prediction, market_spread, spread_edge, today_str)
                 predictions.append({
                     "game":           f"{away_name} @ {home_name}",
+                    "home_team":      home_name,
+                    "away_team":      away_name,
                     "predicted_spread": prediction["predicted_spread"],
                     "market_spread":  market_spread,
                     "spread_edge":    spread_edge,
                     "home_win_prob":  prediction["predicted_home_win_prob"],
+                    "home_spread_juice": (odds or {}).get("home_spread_juice"),
+                    "away_spread_juice": (odds or {}).get("away_spread_juice"),
                 })
 
         # Write daily snapshot
@@ -285,11 +289,11 @@ def _print_predictions(predictions: list[dict]):
         print("\nNo predictions generated today (check stats coverage / model training).")
         return
 
-    print(f"\n{'='*65}")
+    print(f"\n{'='*72}")
     print(f"  COLLEGE LACROSSE PREDICTIONS — {date.today()}")
-    print(f"{'='*65}")
-    print(f"  {'Matchup':<30} {'Pred':>6} {'Mkt':>6} {'Edge':>6} {'HWin%':>6}")
-    print(f"  {'-'*57}")
+    print(f"{'='*72}")
+    print(f"  {'Matchup':<30} {'Pred':>6} {'Mkt':>6} {'Edge':>6} {'HWin%':>6} {'Juice':>6}")
+    print(f"  {'-'*64}")
 
     flagged = []
     for p in sorted(predictions, key=lambda x: abs(x.get("spread_edge") or 0), reverse=True):
@@ -303,16 +307,27 @@ def _print_predictions(predictions: list[dict]):
         mkt_str  = f"{mkt:+.1f}"  if mkt is not None else "  N/A"
         edge_str = f"{edge:+.1f}" if edge is not None else "  N/A"
 
+        # Show juice for the side the model recommends
+        side = "HOME" if (edge or 0) > 0 else "AWAY"
+        juice_key = "home_spread_juice" if side == "HOME" else "away_spread_juice"
+        juice = p.get(juice_key)
+        juice_str = str(juice) if juice is not None else "  N/A"
+
         flag = " ***" if (edge is not None and abs(edge) >= SPREAD_THRESHOLD) else ""
-        print(f"  {game:<30} {pred_str:>6} {mkt_str:>6} {edge_str:>6} {hwp*100:5.1f}%{flag}")
+        print(f"  {game:<30} {pred_str:>6} {mkt_str:>6} {edge_str:>6} {hwp*100:5.1f}%{flag} {juice_str:>6}")
 
         if flag:
-            side = "HOME" if (edge or 0) > 0 else "AWAY"
-            flagged.append(f"  BET: {side} {game}  (edge={edge:+.1f})")
+            flagged.append((side, game, edge, juice))
 
     print()
     if flagged:
+        import math
         print("  FLAGGED BETS (|edge| >= {:.1f}):".format(SPREAD_THRESHOLD))
-        for f in flagged:
-            print(f)
-    print(f"{'='*65}\n")
+        for side, game, edge, juice in flagged:
+            juice_disp = str(juice) if juice is not None else "-110"
+            j = juice if juice is not None else -110
+            breakeven = abs(j) / (abs(j) + 100) * 100
+            payout = round(100.0 / abs(j), 3)
+            print(f"  BET: {side} {game}  edge={edge:+.1f}  juice={juice_disp}  "
+                  f"breakeven={breakeven:.1f}%  win={payout:.3f}u/unit")
+    print(f"{'='*72}\n")

@@ -299,10 +299,33 @@ WHERE ds.spread_edge IS NOT NULL
   AND ds.market_spread IS NOT NULL;
 """
 
+CREATE_BETS = """
+CREATE TABLE IF NOT EXISTS bets (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    bet_date        TEXT NOT NULL,              -- date the bet was placed (YYYY-MM-DD)
+    game_id         INTEGER REFERENCES games(id),
+    game_date       TEXT NOT NULL,
+    home_team       TEXT NOT NULL,
+    away_team       TEXT NOT NULL,
+    model_side      TEXT NOT NULL,              -- 'home' or 'away'
+    market_spread   REAL,                       -- home spread (e.g. +10.5)
+    predicted_spread REAL,
+    spread_edge     REAL,                       -- predicted + market_spread
+    juice           INTEGER NOT NULL,           -- American odds on our side (e.g. -140)
+    units           REAL DEFAULT 1.0,           -- bet size in units
+    result          TEXT DEFAULT 'pending',     -- 'win', 'loss', 'push', 'pending'
+    actual_margin   INTEGER,                    -- home_score - away_score (filled post-game)
+    pnl             REAL,                       -- profit/loss in units (filled post-game)
+    notes           TEXT,
+    created_at      TEXT DEFAULT (datetime('now'))
+);
+"""
+
 ALL_TABLES = [
     CREATE_TEAMS,
     CREATE_GAMES,
     CREATE_GAME_STATS,
+    CREATE_BETS,
     CREATE_TEAM_SEASON_STATS,
     CREATE_BETTING_LINES,
     CREATE_PREDICTIONS,

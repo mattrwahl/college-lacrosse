@@ -17,6 +17,10 @@ Usage:
     python main.py backfill-odds --season 2025
     python main.py evaluate        Print ATS performance summary
     python main.py check-sports    List available sports on The Odds API
+    python main.py log-bet         Interactively log a bet (shows today's picks, prompts for details)
+    python main.py tracker         Print full P&L report for all logged bets
+    python main.py tracker --season 2026   Filter report by season
+    python main.py settle          Auto-settle pending bets using actual game results
 """
 import sys
 import logging
@@ -118,6 +122,21 @@ def main():
             print("No lacrosse sports found in Odds API. Available sports:")
             for s in sports[:30]:
                 print(f"  {s.get('key', '?')}: {s.get('title', '?')}")
+
+    elif command == "log-bet":
+        from jobs.bet_tracker import log_bet_interactive
+        log_bet_interactive()
+
+    elif command == "tracker":
+        from jobs.bet_tracker import print_tracker
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--season", type=int, default=None)
+        args = parser.parse_args(sys.argv[2:])
+        print_tracker(season=args.season)
+
+    elif command == "settle":
+        from jobs.bet_tracker import settle_pending
+        settle_pending()
 
     else:
         print(f"Unknown command: {command}")

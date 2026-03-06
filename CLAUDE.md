@@ -227,14 +227,51 @@ Current `SPREAD_THRESHOLD = 2.0` is arbitrary. To optimize:
   identify if 2025 is an outlier or representative
 Goal: generate a final "bet sizing card" — edge range → recommended unit size.
 
-### 7. Year-Over-Year Performance Table
+### 7. Vig-Adjusted Edge & Bet Sizing
+The current edge calculation (`predicted + market_spread`) tells us *which side* to bet but
+ignores the *cost* of betting. College lacrosse lines are often not standard -110 — heavier
+juice appears when books expect lopsided action (e.g. a big favorite getting even more action).
+
+**Breakeven win rates by juice:**
+- -110 → 52.4%  |  -120 → 54.5%  |  -130 → 56.5%  |  -140 → 58.3%  |  -150 → 60.0%
+
+**Cover probability** (what we actually need, not outright win prob):
+  `cover_prob ≈ Φ((predicted_margin - (-market_spread)) / RMSE)`
+  where RMSE ≈ 6.46 (model prediction std dev), Φ = normal CDF
+  Example: Delaware +10.5, predicted_margin=-3.2:
+    cover_prob = Φ((-3.2 + 10.5) / 6.46) = Φ(1.13) ≈ 87%
+  At -140 juice, breakeven = 58.3% → EV positive
+
+**Juice-adjusted ROI**: `EV = cover_prob * (100/|juice|) - (1-cover_prob) * 1 unit`
+Log actual juice on every bet. The tracker computes real ROI, not assumed-110 ROI.
+
+**Recommended approach for edge threshold**: instead of a fixed spread_edge ≥ 2.0,
+compute `cover_prob - breakeven_prob` where breakeven comes from actual juice.
+Flag bets where `(cover_prob - breakeven_prob) ≥ 0.05` (5pp of edge minimum).
+This replaces the fixed threshold with a juice-aware one.
+
+### 8. Bet Tracker
+A `bets` table in the DB + CLI commands to log bets and report P&L.
+All actual bets placed should be logged here (separate from model predictions).
+
+**Table**: `bets` — game_id, bet_date, model_side, market_spread, juice, units, result, pnl
+**Commands**:
+- `python main.py log-bet` — log a bet you're placing (records juice, units)
+- `python main.py tracker` — P&L report: per-bet log + running totals + ROI by season
+
+**P&L formula (American odds)**:
+- Win: `pnl = units * (100.0 / abs(juice))`  — e.g. 1u at -140 wins 0.714u
+- Loss: `pnl = -units`
+- Push: `pnl = 0`
+
+### 9. Year-Over-Year Performance Table
 Once 2026 games accumulate (May), report format:
 ```
-Season   Bets  W-L      Win%    P&L (units, flat)   ROI%
-2025      243  149-94   61.3%   +18.5u               +7.6%
-2026      ???  ???      ???%    ???                  ???
+Season   Bets  W-L      Win%    P&L (units)   ROI%
+2025      243  149-94   61.3%   +18.5u         +7.6%  (assumes -110)
+2026      ???  ???      ???%    ???            ???     (actual juice tracked)
 ```
-This is the most important live signal — does 2025 repeat in 2026?
+Tracker logs actual juice so 2026 ROI is real, not assumed.
 
 ---
 
