@@ -1,0 +1,22 @@
+# Secrets — never commit
+.env
+
+# Database and data files (large, local only)
+data/
+logs/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+*.egg
+.venv/
+venv/
+env/
+
+# OS
+.DS_Store
+Thumbs.db
