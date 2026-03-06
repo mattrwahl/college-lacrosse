@@ -8,10 +8,13 @@ Usage:
     python main.py backfill --season 2024
     python main.py backfill --games-only   ESPN games/results only (skip box scores)
     python main.py backfill --box-only     Box scores only (skip ESPN games fetch)
+    python main.py fix-slugs               Reset LR slug mappings and re-backfill box scores
     python main.py train           Train/retrain the spread prediction model
     python main.py results         Pull prior-day results + score predictions
     python main.py daily           Scrape today's lines + generate predictions
     python main.py both            results + daily (typical morning run)
+    python main.py backfill-odds           Backfill historical odds for VAL_SEASONS (requires paid Odds API)
+    python main.py backfill-odds --season 2025
     python main.py evaluate        Print ATS performance summary
     python main.py check-sports    List available sports on The Odds API
 """
@@ -50,6 +53,16 @@ def main():
         seasons = [args.season] if args.season else None
         run(seasons=seasons, games_only=args.games_only, box_only=args.box_only)
 
+    elif command == "fix-slugs":
+        # Reset all LR slug mappings and re-run with corrected name overrides.
+        # Use this after updating _LR_ESPN_OVERRIDES in historical_backfill.py.
+        from jobs.historical_backfill import fix_lr_slugs
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--season", type=int, default=None)
+        args = parser.parse_args(sys.argv[2:])
+        seasons = [args.season] if args.season else None
+        fix_lr_slugs(seasons=seasons)
+
     elif command == "train":
         from db.db import get_db
         from processors.model import train
@@ -70,6 +83,20 @@ def main():
         from jobs.daily_job import run as daily_run
         results_run()
         daily_run()
+
+    elif command == "backfill-odds":
+        from jobs.odds_backfill import run as odds_run
+        parser = argparse.ArgumentParser()
+        parser.add_argument("--season", type=int, default=None)
+        parser.add_argument("--seasons", type=int, nargs="+", default=None)
+        args = parser.parse_args(sys.argv[2:])
+        if args.season:
+            seasons = [args.season]
+        elif args.seasons:
+            seasons = args.seasons
+        else:
+            seasons = None
+        odds_run(seasons=seasons)
 
     elif command == "evaluate":
         from db.db import get_db

@@ -54,7 +54,8 @@ BASE_URL  = "https://lacrossereference.com"
 PRO_URL   = "https://pro.lacrossereference.com"
 
 # Regex for game slugs — IDs are alphanumeric (NOT purely numeric)
-_GAME_SLUG_RE = re.compile(r'game-[a-z]+-vs-[a-z]+-mlax-\d{4}-[a-z0-9]+')
+# Team names in slugs may contain hyphens (e.g. "notre-dame", "penn-state", "north-carolina")
+_GAME_SLUG_RE = re.compile(r'game-[a-z-]+-vs-[a-z-]+-mlax-\d{4}-[a-z0-9]+')
 
 _SESSION = requests.Session()
 _SESSION.headers.update({
@@ -127,8 +128,9 @@ def fetch_d1_men_teams() -> list[dict]:
             r = _SESSION.get(team["lr_url"], timeout=15)
             r.raise_for_status()
             # Pro team slug format: teamnamem-DDDD (men's suffix)
+            # Team names may contain hyphens (e.g. "notre-damem-1853", "penn-statem-XXXX")
             schedule_links = re.findall(
-                r"https://pro\.lacrossereference\.com/([a-z]+m-\d{4})\?view=games",
+                r"https://pro\.lacrossereference\.com/([a-z][a-z-]*m-\d{4})\?view=games",
                 r.text,
             )
             if schedule_links:
@@ -137,7 +139,7 @@ def fetch_d1_men_teams() -> list[dict]:
             else:
                 # Broader fallback: any *m-DDDD link on the page
                 broader = re.findall(
-                    r"https://pro\.lacrossereference\.com/([a-z]+m-\d{4})\b",
+                    r"https://pro\.lacrossereference\.com/([a-z][a-z-]*m-\d{4})\b",
                     r.text,
                 )
                 if broader:
@@ -166,7 +168,7 @@ def fetch_team_game_slugs(pro_slug: str, season: int) -> list[str]:
     """
     url = f"{PRO_URL}/{pro_slug}?view=games&year={season}"
     try:
-        resp = _SESSION.get(url, timeout=30)
+        resp = _SESSION.get(url, timeout=(5, 8))  # (connect, read) — prevents TCP hangs
         resp.raise_for_status()
     except requests.RequestException as e:
         logger.warning(f"Failed to fetch game slugs for {pro_slug}/{season}: {e}")
@@ -227,7 +229,7 @@ def fetch_game_box_score(game_slug: str) -> dict | None:
     """
     url = f"{PRO_URL}/{game_slug}"
     try:
-        resp = _SESSION.get(url, timeout=20)
+        resp = _SESSION.get(url, timeout=(5, 20))  # (connect, read)
         resp.raise_for_status()
     except requests.RequestException as e:
         logger.warning(f"Failed to fetch game box score for {game_slug}: {e}")

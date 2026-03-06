@@ -3,8 +3,10 @@ College lacrosse ATS prediction model.
 
 Model: Ridge regression on game-level feature differentials.
        Predicts home_margin = home_score - away_score.
-       Spread edge = predicted_margin - market_spread (positive = home team value,
+       Spread edge = predicted_margin + market_spread (positive = home team value,
        negative = away team value).
+       market_spread: negative = home favored (e.g. -4.5), positive = home underdog (+10.5).
+       edge = predicted_margin - market_implied_margin = predicted + market_spread.
 
 This is a v1 foundation. Planned iterations:
   v2 — logistic regression on ATS cover probability directly

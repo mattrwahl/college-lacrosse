@@ -111,7 +111,10 @@ def run():
                 market_spread = (odds or {}).get("home_spread")
                 spread_edge = None
                 if market_spread is not None:
-                    spread_edge = round(prediction["predicted_spread"] - market_spread, 2)
+                    # edge = predicted_margin - market_implied_margin
+                    # market implied home margin = -market_spread (e.g. home -4.5 → +4.5)
+                    # so edge = predicted + market_spread
+                    spread_edge = round(prediction["predicted_spread"] + market_spread, 2)
                 _save_prediction(conn, game_id, prediction, market_spread, spread_edge, today_str)
                 predictions.append({
                     "game":           f"{away_name} @ {home_name}",

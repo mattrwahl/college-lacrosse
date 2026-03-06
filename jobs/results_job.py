@@ -127,7 +127,7 @@ def _update_snapshot_ats(conn, game_id: int, home_score: int, away_score: int, d
     ).fetchone()
     spread_edge = None
     if predicted_spread and market_spread is not None:
-        spread_edge = round(predicted_spread["predicted_spread"] - market_spread, 2)
+        spread_edge = round(predicted_spread["predicted_spread"] + market_spread, 2)
 
     conn.execute(
         """

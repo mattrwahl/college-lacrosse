@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from db.db import (
-    get_db, init_db, upsert_team, upsert_game, get_team_id,
+    get_db, init_db, upsert_team, upsert_game, upsert_lr_game, get_team_id,
     upsert_result, upsert_game_stats, build_slug_name_map,
 )
 from scrapers.espn_scraper import fetch_season_schedule, fetch_teams
@@ -36,6 +36,36 @@ from config import ALL_SEASONS, SEASON_YEAR, DB_PATH
 from shared.team_mapper import resolve_team_name
 
 logger = logging.getLogger(__name__)
+
+# Explicit LR display name → ESPN canonical name overrides.
+# Used in backfill_lr_team_data() to resolve ambiguous or failed fuzzy matches.
+# Teams NOT in this dict use the automated (exact → prefix → fuzzy) pipeline.
+_LR_ESPN_OVERRIDES: dict[str, str] = {
+    # Prefix-matching false positives: LR short name is a PREFIX of the wrong ESPN team
+    "Penn":            "Pennsylvania Quakers",      # "Penn " is prefix of "Penn State Nittany Lions"
+    "UMass":           "Massachusetts Minutemen",   # "UMass " is prefix of "UMass Lowell River Hawks"
+    "Albany":          "UAlbany Great Danes",       # LR "Albany" → ESPN "UAlbany Great Danes" (not duplicate "Albany")
+    # Teams that fail all automated matching due to name divergence
+    "Penn State":      "Penn State Nittany Lions",
+    "Notre Dame":      "Notre Dame Fighting Irish",
+    "Ohio State":      "Ohio State Buckeyes",
+    "North Carolina":  "North Carolina Tar Heels",
+    "Boston U":        "Boston University Terriers",
+    "Johns Hopkins":   "Johns Hopkins University Blue Jays",
+    "Sacred Heart":    "Sacred Heart Pioneers",
+    "St. John's":      "St. John's Red Storm",
+    "Holy Cross":      "Holy Cross Crusaders",
+    "Stony Brook":     "Stony Brook Seawolves",
+    "Robert Morris":   "Robert Morris Colonials",
+    "St. Bonaventure": "St. Bonaventure Bonnies",
+    "Mount St Marys":  "Mount St. Mary's Mountaineers",
+    "Air Force":       "Air Force Falcons",
+    "High Point":      "High Point Panthers",
+    "Le Moyne":        "Le Moyne Dolphins",
+    "Cleveland State": "Cleveland State Vikings",
+    "Saint Joseph's":  "Saint Joseph's Hawks",
+    # Not in LR D1 database: Hartford, Furman, Lindenwood, Roberts Wesleyan
+}
 
 
 def backfill_teams(conn) -> int:
@@ -77,13 +107,21 @@ def _find_by_fuzzy(conn, lr_name: str, canonical_names: list) -> int | None:
     return None
 
 
-def backfill_lr_team_data(conn) -> int:
+def backfill_lr_team_data(conn, reset_existing: bool = False) -> int:
     """
     Fetch D1 men team list from lacrossereference.com and update each team's
     lr_pro_slug and lacrosse_ref_name in the teams table.
 
+    reset_existing: if True, clears all lr_pro_slug / lacrosse_ref_name values
+                    before re-populating (use when fixing wrong assignments).
+
     Returns number of teams updated.
     """
+    if reset_existing:
+        logger.info("Clearing existing lr_pro_slug / lacrosse_ref_name before re-mapping...")
+        with conn:
+            conn.execute("UPDATE teams SET lr_pro_slug = NULL, lacrosse_ref_name = NULL")
+
     logger.info("Fetching D1 team list from lacrossereference.com...")
     lr_teams = fetch_d1_men_teams()
 
@@ -98,15 +136,24 @@ def backfill_lr_team_data(conn) -> int:
             lr_name = t.get("name")
             pro_slug = t.get("pro_slug")
             if not lr_name or not pro_slug:
+                logger.debug(f"Skipping LR team '{lr_name}' — no pro_slug resolved")
                 continue
 
-            # Multi-strategy match: LR uses short names ("Duke"), ESPN uses full
-            # names with mascots ("Duke Blue Devils"). Try in order:
-            team_id = (
-                get_team_id(conn, lr_name)                               # 1. exact
-                or _find_by_prefix(conn, lr_name)                        # 2. ESPN name starts with LR name
-                or _find_by_fuzzy(conn, lr_name, canonical_names)        # 3. difflib fuzzy
-            )
+            # 0. Explicit override takes highest priority (handles ambiguous prefix matches
+            #    and name divergence cases like "Penn" vs "Penn State", "Albany" vs "UAlbany")
+            if lr_name in _LR_ESPN_OVERRIDES:
+                espn_name = _LR_ESPN_OVERRIDES[lr_name]
+                team_id = get_team_id(conn, espn_name)
+                if team_id is None:
+                    logger.warning(f"Override target '{espn_name}' for LR '{lr_name}' not found in DB")
+            else:
+                # Multi-strategy match: LR uses short names ("Duke"), ESPN uses full
+                # names with mascots ("Duke Blue Devils"). Try in order:
+                team_id = (
+                    get_team_id(conn, lr_name)                               # 1. exact
+                    or _find_by_prefix(conn, lr_name)                        # 2. ESPN name starts with LR name
+                    or _find_by_fuzzy(conn, lr_name, canonical_names)        # 3. difflib fuzzy
+                )
 
             if team_id is not None:
                 conn.execute(
@@ -219,15 +266,22 @@ def backfill_game_box_scores(conn, seasons: list[int]) -> int:
 
     # Collect (slug → team_db_id) — if a game appears for both teams, either is fine
     slug_to_team: dict[str, int] = {}
-    for team_row in team_rows:
+    for ti, team_row in enumerate(team_rows, 1):
         team_db_id = team_row["id"]
         pro_slug = team_row["lr_pro_slug"]
+        team_slugs = 0
         for season in seasons:
             slugs = fetch_team_game_slugs(pro_slug, season)
+            team_slugs += len(slugs)
             for slug in slugs:
                 if slug not in slug_to_team:
                     slug_to_team[slug] = team_db_id
             time.sleep(0.2)  # polite delay
+        logger.info(
+            f"  Slug collection: {ti}/{len(team_rows)} teams done "
+            f"({team_row['canonical_name']} — {team_slugs} new slugs, "
+            f"{len(slug_to_team)} total so far)"
+        )
 
     logger.info(f"Collected {len(slug_to_team)} unique game slugs across all seasons")
 
@@ -238,11 +292,13 @@ def backfill_game_box_scores(conn, seasons: list[int]) -> int:
     logger.info(f"Slug name map: {len(slug_name_map)} teams")
 
     # Regex to parse home/away slug names and year from a game slug
-    _SLUG_PARSE_RE = re.compile(r'^game-([a-z]+)-vs-([a-z]+)-mlax-(\d{4})-[a-z0-9]+$')
+    # Team names may contain hyphens (e.g. "notre-dame", "penn-state", "north-carolina")
+    _SLUG_PARSE_RE = re.compile(r'^game-([a-z-]+)-vs-([a-z-]+)-mlax-(\d{4})-[a-z0-9]+$')
 
     inserted = 0
     skipped_no_data = 0
     skipped_no_game = 0
+    lr_only_candidates = []  # (game_slug, box, home_team_db_id, away_team_db_id)
 
     for i, (game_slug, fallback_team_id) in enumerate(slug_to_team.items(), 1):
         if i % 100 == 0:
@@ -254,8 +310,13 @@ def backfill_game_box_scores(conn, seasons: list[int]) -> int:
         away_slug_name = slug_m.group(2) if slug_m else None
         slug_year = int(slug_m.group(3)) if slug_m else None
 
-        home_team_db_id = slug_name_map.get(home_slug_name) if home_slug_name else None
-        away_team_db_id = slug_name_map.get(away_slug_name) if away_slug_name else None
+        # Slug names may contain hyphens (e.g. "notre-dame") but slug_name_map keys
+        # have hyphens stripped ("notredame") — must strip before lookup.
+        home_slug_clean = home_slug_name.replace("-", "") if home_slug_name else None
+        away_slug_clean = away_slug_name.replace("-", "") if away_slug_name else None
+
+        home_team_db_id = slug_name_map.get(home_slug_clean) if home_slug_clean else None
+        away_team_db_id = slug_name_map.get(away_slug_clean) if away_slug_clean else None
 
         # Skip if neither team is in our slug map (both non-D1 or unknown)
         if home_team_db_id is None and away_team_db_id is None:
@@ -308,8 +369,18 @@ def backfill_game_box_scores(conn, seasons: list[int]) -> int:
                 (known_id, known_id, game_date, season),
             ).fetchone()
 
+        # Check if already stored as an LR-only game from a previous backfill run
         if game_row is None:
-            skipped_no_game += 1
+            game_row = conn.execute(
+                "SELECT id FROM games WHERE lr_game_slug = ?", (game_slug,)
+            ).fetchone()
+
+        if game_row is None:
+            # No ESPN match — queue for LR-only second pass if both teams are D1
+            if home_team_db_id and away_team_db_id:
+                lr_only_candidates.append((game_slug, box, home_team_db_id, away_team_db_id))
+            else:
+                skipped_no_game += 1
             continue
 
         with conn:
@@ -318,10 +389,58 @@ def backfill_game_box_scores(conn, seasons: list[int]) -> int:
 
         time.sleep(0.15)
 
+    # Second pass: insert LR-only games (both teams D1, no ESPN equivalent)
+    lr_inserted = _insert_lr_only_games(conn, lr_only_candidates)
+
     logger.info(
-        f"Box score backfill done: {inserted} inserted, "
-        f"{skipped_no_data} no data, {skipped_no_game} no matching game"
+        f"Box score backfill done: {inserted} ESPN-matched, "
+        f"{lr_inserted} LR-only inserted, "
+        f"{skipped_no_data} no data, {skipped_no_game} no matching game (non-D1)"
     )
+    return inserted + lr_inserted
+
+
+def _insert_lr_only_games(conn, candidates: list) -> int:
+    """
+    Second pass: insert games + results + game_stats for LR-only slugs
+    (both teams are D1 but no matching ESPN game exists).
+
+    candidates: list of (game_slug, box_score_dict, home_team_db_id, away_team_db_id)
+    """
+    inserted = 0
+    for game_slug, box, home_id, away_id in candidates:
+        game_date = box.get("game_date")
+        season = box.get("season")
+        home_goals = box.get("home_goals")
+        away_goals = box.get("away_goals")
+
+        if not game_date or not season:
+            continue
+
+        with conn:
+            game_id = upsert_lr_game(conn, {
+                "season":       season,
+                "game_date":    game_date,
+                "home_team_id": home_id,
+                "away_team_id": away_id,
+                "lr_game_slug": game_slug,
+            })
+
+            # Insert result from box score goals
+            if home_goals is not None and away_goals is not None:
+                winner_id = home_id if home_goals > away_goals else away_id
+                upsert_result(conn, game_id, {
+                    "home_score":     home_goals,
+                    "away_score":     away_goals,
+                    "winner_team_id": winner_id,
+                    "game_status":    "final",
+                })
+
+            upsert_game_stats(conn, game_id, box)
+
+        inserted += 1
+
+    logger.info(f"LR-only second pass: {inserted}/{len(candidates)} games inserted")
     return inserted
 
 
@@ -378,6 +497,30 @@ def _teams_have_lr_slugs(conn) -> bool:
         "SELECT COUNT(*) as n FROM teams WHERE lr_pro_slug IS NOT NULL"
     ).fetchone()
     return (row["n"] or 0) > 0
+
+
+def fix_lr_slugs(seasons: list[int] = None):
+    """
+    One-shot command to:
+      1. Reset all lr_pro_slug / lacrosse_ref_name assignments
+      2. Re-fetch D1 team list with corrected name overrides
+      3. Re-run box score backfill for the newly-mapped teams
+
+    Use after correcting _LR_ESPN_OVERRIDES to fix wrong slug assignments.
+    """
+    if seasons is None:
+        seasons = ALL_SEASONS
+
+    init_db()
+    conn = get_db()
+
+    # Step 1+2: Reset and re-map all slugs
+    backfill_lr_team_data(conn, reset_existing=True)
+
+    # Step 3: Re-run box scores (idempotent — won't duplicate existing rows)
+    total_box = backfill_game_box_scores(conn, seasons)
+    logger.info(f"fix_lr_slugs complete: {total_box} game_stats rows inserted/updated")
+    conn.close()
 
 
 def probe_lacrosse_ref(season: int = 2024):

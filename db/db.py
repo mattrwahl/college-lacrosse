@@ -29,8 +29,25 @@ def init_db():
     with conn:
         for ddl in ALL_TABLES:
             conn.execute(ddl)
+        _migrate_db(conn)
     logger.info(f"Database initialized at {DB_PATH}")
     conn.close()
+
+
+def _migrate_db(conn: sqlite3.Connection):
+    """Apply incremental schema migrations for existing databases."""
+    existing_cols = {row[1] for row in conn.execute("PRAGMA table_info(games)")}
+    if "lr_game_slug" not in existing_cols:
+        conn.execute("ALTER TABLE games ADD COLUMN lr_game_slug TEXT")
+        logger.info("DB migration: added lr_game_slug column to games table")
+    if "source" not in existing_cols:
+        conn.execute("ALTER TABLE games ADD COLUMN source TEXT DEFAULT 'espn'")
+        logger.info("DB migration: added source column to games table")
+    # Always ensure the partial unique index exists (handles both fresh install and migration)
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_games_lr_slug "
+        "ON games(lr_game_slug) WHERE lr_game_slug IS NOT NULL"
+    )
 
 
 def upsert_team(conn: sqlite3.Connection, canonical_name: str, **kwargs) -> int:
@@ -112,11 +129,17 @@ def build_slug_name_map(conn: sqlite3.Connection) -> dict:
     Build a mapping from game-slug team name to our teams.id.
 
     Pro slugs follow the pattern "{teamname}m-{digits}" (men's suffix).
-    Game slugs use just "{teamname}" (without the "m-DDDD" suffix).
-    E.g. lr_pro_slug "dukem-5269" → slug_name "duke" → team_db_id.
+    Game slugs use just "{teamname}" (without the "m-DDDD" suffix)
+    AND with all hyphens removed.
 
-    This is the correct matching key for game slugs like
-    "game-duke-vs-jacksonville-mlax-2026-8195".
+    Examples:
+      lr_pro_slug "dukem-5269"         → slug_name "duke"         → team_db_id
+      lr_pro_slug "notre-damem-1853"   → slug_name "notredame"    → team_db_id
+      lr_pro_slug "north-carolinam-..." → slug_name "northcarolina" → team_db_id
+
+    Verified from game slugs like:
+      "game-duke-vs-notredame-mlax-2024-6h86"
+      "game-northcarolina-vs-pennstate-mlax-2024-..."
     """
     rows = conn.execute(
         "SELECT id, lr_pro_slug FROM teams WHERE lr_pro_slug IS NOT NULL"
@@ -125,7 +148,9 @@ def build_slug_name_map(conn: sqlite3.Connection) -> dict:
     for row in rows:
         m = re.match(r"^(.*?)m-\d+$", row["lr_pro_slug"])
         if m:
-            result[m.group(1)] = row["id"]
+            # Strip hyphens: "notre-dame" → "notredame" to match game slug format
+            slug_name = m.group(1).replace("-", "")
+            result[slug_name] = row["id"]
     return result
 
 
@@ -169,6 +194,46 @@ def upsert_game(conn: sqlite3.Connection, game: dict) -> int:
         (game["espn_game_id"],),
     ).fetchone()
     return row["id"] if row else conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+
+
+def upsert_lr_game(conn: sqlite3.Connection, game: dict) -> int:
+    """
+    Insert or update a game row sourced only from LacrosseReference (no espn_game_id).
+    Uses lr_game_slug as the dedup key via a partial unique index.
+
+    game dict keys: season, game_date, home_team_id, away_team_id,
+                    lr_game_slug, neutral_site (optional, default 0)
+    """
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO games
+            (season, game_date, home_team_id, away_team_id, lr_game_slug, source, neutral_site)
+        VALUES (?, ?, ?, ?, ?, 'lr', ?)
+        """,
+        (
+            game["season"],
+            game["game_date"],
+            game["home_team_id"],
+            game["away_team_id"],
+            game["lr_game_slug"],
+            game.get("neutral_site", 0),
+        ),
+    )
+    # Also update in case this is a re-run with corrected data
+    conn.execute(
+        """
+        UPDATE games SET
+            game_date    = ?,
+            home_team_id = ?,
+            away_team_id = ?
+        WHERE lr_game_slug = ?
+        """,
+        (game["game_date"], game["home_team_id"], game["away_team_id"], game["lr_game_slug"]),
+    )
+    row = conn.execute(
+        "SELECT id FROM games WHERE lr_game_slug = ?", (game["lr_game_slug"],)
+    ).fetchone()
+    return row["id"]
 
 
 def upsert_result(conn: sqlite3.Connection, game_id: int, result: dict):

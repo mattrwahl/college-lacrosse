@@ -35,12 +35,20 @@ CREATE TABLE IF NOT EXISTS games (
     home_team_id    INTEGER REFERENCES teams(id),
     away_team_id    INTEGER REFERENCES teams(id),
     espn_game_id    TEXT UNIQUE,
+    lr_game_slug    TEXT,                       -- lacrosse-ref slug for LR-sourced games
+    source          TEXT DEFAULT 'espn',        -- 'espn' or 'lr'
     neutral_site    INTEGER DEFAULT 0,
     conference_game INTEGER DEFAULT 0,
     tournament_game INTEGER DEFAULT 0,          -- 1 if NCAA tournament
     tournament_round TEXT,                      -- e.g. "First Round", "Quarterfinal"
     created_at      TEXT DEFAULT (datetime('now'))
 );
+"""
+
+# Partial unique index on lr_game_slug (NULLs excluded — ESPN rows leave it NULL)
+CREATE_GAMES_LR_SLUG_INDEX = """
+CREATE UNIQUE INDEX IF NOT EXISTS idx_games_lr_slug
+    ON games(lr_game_slug) WHERE lr_game_slug IS NOT NULL;
 """
 
 # Per-game box score stats — one row per game (home+away in same row).

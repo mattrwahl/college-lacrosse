@@ -163,6 +163,99 @@ def _extract_lines(
     return home_ml, away_ml, home_spread, away_spread, home_juice, away_juice
 
 
+def fetch_historical_odds(date_iso: str) -> list[dict]:
+    """
+    Fetch college lacrosse odds from Odds API historical endpoint.
+
+    date_iso: ISO 8601 UTC datetime string, e.g. '2025-04-01T14:00:00Z'
+              Use ~10am ET (14:00 UTC) to capture pre-game lines.
+
+    Returns same format as scrape_lines() — list of game dicts with
+    home_team, away_team, home_spread, away_spread, etc.
+
+    Requires paid Odds API plan with Historian access.
+    """
+    if not ODDS_API_KEY:
+        raise ValueError("ODDS_API_KEY not set. Add it to .env.")
+
+    params = {
+        "apiKey": ODDS_API_KEY,
+        "regions": "us",
+        "markets": ",".join(ODDS_MARKETS),
+        "oddsFormat": "american",
+        "date": date_iso,
+    }
+
+    try:
+        resp = requests.get(
+            f"{ODDS_API_BASE}/historical/sports/{ODDS_API_SPORT}/odds",
+            params=params,
+            timeout=30,
+        )
+        resp.raise_for_status()
+    except requests.RequestException as e:
+        logger.error(f"Historical Odds API request failed for {date_iso}: {e}")
+        raise
+
+    payload = resp.json()
+    events = payload.get("data", [])
+    scraped_at = date_iso
+
+    games = []
+    for event in events:
+        home_team = event.get("home_team", "")
+        away_team = event.get("away_team", "")
+        commence_time = event.get("commence_time", "")
+        try:
+            game_date = commence_time[:10]
+        except Exception:
+            game_date = date_iso[:10]
+
+        bookmakers = event.get("bookmakers", [])
+        by_book = {b["key"]: b for b in bookmakers}
+
+        home_ml, away_ml, home_spread, away_spread, h_juice, a_juice, book_used = (
+            None, None, None, None, None, None, ""
+        )
+
+        for book_key in PREFERRED_BOOKS:
+            if book_key not in by_book:
+                continue
+            result = _extract_lines(by_book[book_key], home_team, away_team)
+            if result:
+                home_ml, away_ml, home_spread, away_spread, h_juice, a_juice = result
+                book_used = book_key
+                break
+
+        if not book_used:
+            for b in bookmakers:
+                result = _extract_lines(b, home_team, away_team)
+                if result:
+                    home_ml, away_ml, home_spread, away_spread, h_juice, a_juice = result
+                    book_used = b["key"]
+                    break
+
+        if home_ml is None and home_spread is None:
+            continue
+
+        games.append({
+            "home_team": home_team,
+            "away_team": away_team,
+            "home_moneyline": home_ml,
+            "away_moneyline": away_ml,
+            "home_spread": home_spread,
+            "away_spread": away_spread,
+            "home_spread_juice": h_juice,
+            "away_spread_juice": a_juice,
+            "book": book_used,
+            "game_date": game_date,
+            "commence_time": commence_time,
+            "scraped_at": scraped_at,
+        })
+
+    return games
+
+
 def get_available_sports() -> list[dict]:
     """List all sports available on The Odds API. Use to confirm lacrosse sport key."""
     if not ODDS_API_KEY:
